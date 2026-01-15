@@ -3,7 +3,13 @@ use alloy::primitives::Address;
 use log::{error, info};
 use mongodb::Database;
 
-use crate::{errors::ApiError, handlers::token::service::TokenService};
+use crate::{
+    errors::ApiError,
+    handlers::{
+        config::auth::ApiKey,
+        token::service::TokenService,
+    },
+};
 
 /// GET /tokens - Returns all tokens
 ///
@@ -134,6 +140,58 @@ pub async fn count_tokens_by_network_id_handler(
                 "Failed to retrieve token count: {}",
                 e
             )))
+        }
+    }
+}
+
+/// DELETE /tokens/network/{network_id}/address/{address} - Soft deletes a token
+/// Requires API key authentication via X-API-Key header
+pub async fn delete_token_by_address_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<(u64, String)>,
+) -> Result<HttpResponse, ApiError> {
+    let (network_id, address_str) = path.into_inner();
+    info!(
+        "Handling DELETE /tokens/network/{}/address/{} request",
+        network_id, address_str
+    );
+
+    let address = match address_str.parse::<Address>() {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Invalid address format: {}", e);
+            return Err(ApiError::BadRequest(format!(
+                "Invalid address format: {}",
+                e
+            )));
+        }
+    };
+
+    match TokenService::delete_token(&db, network_id, &address).await {
+        Ok(()) => {
+            info!(
+                "Successfully soft deleted token with network_id {} and address {}",
+                network_id, address_str
+            );
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!(
+                "Failed to delete token with network_id {} and address {}: {}",
+                network_id, address_str, e
+            );
+            if e.to_string().contains("not found") {
+                Err(ApiError::NotFound(format!(
+                    "Token with network_id {} and address {} not found",
+                    network_id, address_str
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to delete token: {}",
+                    e
+                )))
+            }
         }
     }
 }

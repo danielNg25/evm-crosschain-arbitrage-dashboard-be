@@ -222,3 +222,43 @@ pub async fn update_path_handler(
         }
     }
 }
+
+/// DELETE /paths/{id} - Soft deletes a path (sets deleted_at)
+/// Requires API key authentication via X-API-Key header
+pub async fn delete_path_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    let id_str = path.into_inner();
+    info!("Handling DELETE /paths/{} request", id_str);
+
+    let id = match ObjectId::parse_str(&id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            error!("Invalid ObjectId format: {}", e);
+            return Err(ApiError::BadRequest(format!("Invalid ID format: {}", e)));
+        }
+    };
+
+    match PathService::delete_path(&db, &id).await {
+        Ok(()) => {
+            info!("Successfully soft deleted path with id: {}", id_str);
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!("Failed to delete path {}: {}", id_str, e);
+            if e.to_string().contains("not found") {
+                Err(ApiError::NotFound(format!(
+                    "Path with id {} not found",
+                    id_str
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to delete path: {}",
+                    e
+                )))
+            }
+        }
+    }
+}

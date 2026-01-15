@@ -229,3 +229,43 @@ pub async fn update_pool_handler(
         }
     }
 }
+
+/// DELETE /pools/{id} - Soft deletes a pool (sets deleted_at)
+/// Requires API key authentication via X-API-Key header
+pub async fn delete_pool_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    let id_str = path.into_inner();
+    info!("Handling DELETE /pools/{} request", id_str);
+
+    let id = match ObjectId::parse_str(&id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            error!("Invalid ObjectId format: {}", e);
+            return Err(ApiError::BadRequest(format!("Invalid ID format: {}", e)));
+        }
+    };
+
+    match PoolService::delete_pool(&db, &id).await {
+        Ok(()) => {
+            info!("Successfully soft deleted pool with id: {}", id_str);
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!("Failed to delete pool {}: {}", id_str, e);
+            if e.to_string().contains("not found") {
+                Err(ApiError::NotFound(format!(
+                    "Pool with id {} not found",
+                    id_str
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to delete pool: {}",
+                    e
+                )))
+            }
+        }
+    }
+}

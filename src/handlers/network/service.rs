@@ -26,7 +26,13 @@ impl NetworkService {
         debug!("Fetching all networks");
 
         let collection = db.collection::<Network>("networks");
-        let filter = doc! {};
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut networks = Vec::new();
 
@@ -52,16 +58,22 @@ impl NetworkService {
             .map(|oid| oid.to_hex())
             .unwrap_or_else(|| "unknown".to_string());
 
-        // Use the first RPC from the rpcs vector, or None if empty
-        let rpc = network.rpcs.first().cloned();
-
         NetworkResponse {
             id,
             chain_id: network.chain_id,
             name: network.name,
-            rpc,
+            rpcs: network.rpcs,
+            websocket_urls: network.websocket_urls,
             block_explorer: network.block_explorer,
+            wrap_native: network.wrap_native,
+            min_profit_usd: network.min_profit_usd,
+            v2_factory_to_fee: network.v2_factory_to_fee,
+            aero_factory_addresses: network.aero_factory_addresses,
+            multicall_address: network.multicall_address,
+            max_blocks_per_batch: network.max_blocks_per_batch,
+            wait_time_fetch: network.wait_time_fetch,
             created_at: network.created_at,
+            updated_at: network.updated_at,
         }
     }
 
@@ -81,7 +93,14 @@ impl NetworkService {
         debug!("Fetching network with chain_id: {}", chain_id);
 
         let collection = db.collection::<Network>("networks");
-        let filter = doc! { "chain_id": chain_id as i64 };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "chain_id": chain_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let network = collection.find_one(filter).await?;
 
         if let Some(network) = network {
@@ -98,8 +117,8 @@ impl NetworkService {
     /// * `request` - CreateNetworkRequest containing network data
     ///
     /// # Returns
-    /// * `Ok(NetworkResponse)` - Created network
-    /// * `Err(anyhow::Error)` - Error if database operation fails or network already exists
+    /// * `Ok(NetworkResponse)` - Created or restored network
+    /// * `Err(anyhow::Error)` - Error if database operation fails
     pub async fn create_network(
         db: &Database,
         request: CreateNetworkRequest,
@@ -108,13 +127,38 @@ impl NetworkService {
 
         let collection = db.collection::<Network>("networks");
 
-        // Check if network already exists
+        // Check if network exists (including soft-deleted)
         let filter = doc! { "chain_id": request.chain_id as i64 };
-        if collection.find_one(filter).await?.is_some() {
-            return Err(anyhow::anyhow!(
-                "Network with chain_id {} already exists",
+        let existing = collection.find_one(filter.clone()).await?;
+
+        if let Some(mut existing_network) = existing {
+            // Network exists, restore it and update with new data
+            debug!(
+                "Network with chain_id {} exists, restoring and updating",
                 request.chain_id
-            ));
+            );
+
+            let update = doc! {
+                "$set": {
+                    "name": &request.name,
+                    "rpcs": &request.rpcs,
+                    "websocket_urls": bson::to_bson(&request.websocket_urls)?,
+                    "wrap_native": &request.wrap_native,
+                    "min_profit_usd": request.min_profit_usd,
+                    "block_explorer": bson::to_bson(&request.block_explorer)?,
+                    "v2_factory_to_fee": bson::to_bson(&request.v2_factory_to_fee)?,
+                    "aero_factory_addresses": bson::to_bson(&request.aero_factory_addresses)?,
+                    "multicall_address": bson::to_bson(&request.multicall_address)?,
+                    "max_blocks_per_batch": request.max_blocks_per_batch as i64,
+                    "wait_time_fetch": request.wait_time_fetch as i64,
+                    "updated_at": chrono::Utc::now().timestamp() as i64,
+                    "deleted_at": null
+                }
+            };
+
+            collection.update_one(filter.clone(), update).await?;
+            let updated = collection.find_one(filter).await?.unwrap();
+            return Ok(Self::map_to_response(updated));
         }
 
         // Create new network
@@ -288,23 +332,37 @@ impl NetworkService {
     /// * `Ok(())` - Network deleted successfully
     /// * `Err(anyhow::Error)` - Error if database operation fails or network not found
     pub async fn delete_network(db: &Database, chain_id: u64) -> anyhow::Result<()> {
-        debug!("Deleting network with chain_id: {}", chain_id);
+        debug!("Soft deleting network with chain_id: {}", chain_id);
 
         let collection = db.collection::<Network>("networks");
-        let filter = doc! { "chain_id": chain_id as i64 };
+        // Only soft-delete if not already deleted
+        let filter = doc! {
+            "chain_id": chain_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
 
-        // Check if network exists
+        // Check if network exists and is not already deleted
         let existing = collection.find_one(filter.clone()).await?;
         if existing.is_none() {
             return Err(anyhow::anyhow!(
-                "Network with chain_id {} not found",
+                "Network with chain_id {} not found or already deleted",
                 chain_id
             ));
         }
 
-        collection.delete_one(filter).await?;
+        // Soft delete: set deleted_at timestamp
+        let update = doc! {
+            "$set": {
+                "deleted_at": chrono::Utc::now().timestamp() as i64,
+                "updated_at": chrono::Utc::now().timestamp() as i64
+            }
+        };
+        collection.update_one(filter, update).await?;
 
-        debug!("Network deleted successfully: {}", chain_id);
+        debug!("Network soft deleted successfully: {}", chain_id);
         Ok(())
     }
 }

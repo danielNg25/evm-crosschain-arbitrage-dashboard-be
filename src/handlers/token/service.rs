@@ -25,7 +25,13 @@ impl TokenService {
         debug!("Fetching all tokens");
 
         let collection = db.collection::<Token>("tokens");
-        let filter = doc! {};
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut tokens = Vec::new();
 
@@ -53,7 +59,14 @@ impl TokenService {
         debug!("Fetching tokens with network_id: {}", network_id);
 
         let collection = db.collection::<Token>("tokens");
-        let filter = doc! { "network_id": network_id as i64 };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut tokens = Vec::new();
 
@@ -88,9 +101,14 @@ impl TokenService {
 
         let collection = db.collection::<Token>("tokens");
         let addr_str = address_to_string(address);
+        // Filter out soft-deleted records
         let filter = doc! {
             "network_id": network_id as i64,
-            "address": &addr_str
+            "address": &addr_str,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
         };
         let token = collection.find_one(filter).await?;
 
@@ -114,10 +132,65 @@ impl TokenService {
         debug!("Counting tokens with network_id: {}", network_id);
 
         let collection = db.collection::<Token>("tokens");
-        let filter = doc! { "network_id": network_id as i64 };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let count = collection.count_documents(filter).await?;
 
         Ok(count)
+    }
+
+    /// Soft delete a token by network_id and address (set deleted_at instead of removing)
+    pub async fn delete_token(
+        db: &Database,
+        network_id: u64,
+        address: &Address,
+    ) -> anyhow::Result<()> {
+        debug!(
+            "Soft deleting token with network_id: {}, address: {}",
+            network_id,
+            address_to_string(address)
+        );
+
+        let collection = db.collection::<Token>("tokens");
+        let addr_str = address_to_string(address);
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "address": &addr_str,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
+
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Token with network_id {} and address {} not found or already deleted",
+                network_id,
+                addr_str
+            ));
+        }
+
+        let update = doc! {
+            "$set": {
+                "deleted_at": chrono::Utc::now().timestamp() as i64,
+                "updated_at": chrono::Utc::now().timestamp() as i64,
+            }
+        };
+
+        collection.update_one(filter, update).await?;
+
+        debug!(
+            "Token soft deleted successfully: network_id={}, address={}",
+            network_id, addr_str
+        );
+        Ok(())
     }
 
     /// Map Token model to TokenResponse DTO

@@ -1,6 +1,6 @@
-use alloy::eips::BlockId;
+use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
-use alloy::providers::{Provider, ProviderBuilder};
+use alloy::providers::{Provider, ProviderBuilder, MULTICALL3_ADDRESS};
 use futures::TryStreamExt;
 use log::{debug, error, warn};
 use mongodb::bson::{doc, oid::ObjectId};
@@ -9,6 +9,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use url::Url;
 
+use crate::bot::providers::create_provider;
+use crate::handlers::network::service::NetworkService;
 use crate::{
     bot::providers::pool_fetcher::identify_and_fetch_pool,
     database::models::utils::address_to_string,
@@ -20,6 +22,56 @@ use crate::{
 pub struct PoolService;
 
 impl PoolService {
+    /// Verify a pool on-chain by identifying its type and fetching its data.
+    ///
+    /// This ensures the pool is a valid Uniswap V2/V3 pool before we persist it.
+    async fn verify_pool_on_chain(
+        db: &Database,
+        network_id: u64,
+        address: &str,
+    ) -> anyhow::Result<()> {
+        let network = NetworkService::get_network_by_chain_id(db, network_id).await?;
+        match network {
+            Some(network) => {
+                let provider = create_provider(network.rpcs);
+                let multicall_address: Address = network
+                    .multicall_address
+                    .unwrap_or(MULTICALL3_ADDRESS.to_string())
+                    .parse::<Address>()
+                    .unwrap();
+
+                if let Err(e) = identify_and_fetch_pool(
+                    Arc::new(provider),
+                    address.parse::<Address>().unwrap(),
+                    BlockId::Number(BlockNumberOrTag::Latest),
+                    multicall_address,
+                    &network.v2_factory_to_fee.unwrap_or_default(),
+                    &network
+                        .aero_factory_addresses
+                        .unwrap_or_default()
+                        .iter()
+                        .map(|address| address.parse::<Address>().unwrap())
+                        .collect::<Vec<Address>>(),
+                )
+                .await
+                {
+                    return Err(anyhow::anyhow!(
+                        "Failed to identify and fetch pool: {} for pool address: {}",
+                        e,
+                        address
+                    ));
+                }
+            }
+            None => {
+                return Err(anyhow::anyhow!(
+                    "Network with chain_id {} not found",
+                    network_id
+                ));
+            }
+        }
+
+        Ok(())
+    }
     /// Get all pools
     ///
     /// # Arguments
@@ -32,7 +84,13 @@ impl PoolService {
         debug!("Fetching all pools");
 
         let collection = db.collection::<Pool>("pools");
-        let filter = doc! {};
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut pools = Vec::new();
 
@@ -60,7 +118,14 @@ impl PoolService {
         debug!("Fetching pools with network_id: {}", network_id);
 
         let collection = db.collection::<Pool>("pools");
-        let filter = doc! { "network_id": network_id as i64 };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut pools = Vec::new();
 
@@ -95,9 +160,14 @@ impl PoolService {
 
         let collection = db.collection::<Pool>("pools");
         let addr_str = address_to_string(address);
+        // Filter out soft-deleted records
         let filter = doc! {
             "network_id": network_id as i64,
-            "address": &addr_str
+            "address": &addr_str,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
         };
         let pool = collection.find_one(filter).await?;
 
@@ -121,7 +191,14 @@ impl PoolService {
         debug!("Counting pools with network_id: {}", network_id);
 
         let collection = db.collection::<Pool>("pools");
-        let filter = doc! { "network_id": network_id as i64 };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let count = collection.count_documents(filter).await?;
 
         Ok(count)
@@ -143,18 +220,22 @@ impl PoolService {
         address: &str,
     ) -> anyhow::Result<()> {
         let collection = db.collection::<Pool>("pools");
+        // Check if pool exists (including soft-deleted)
         let filter = doc! {
             "network_id": network_id as i64,
             "address": address
         };
 
-        // Check if pool exists
         let existing = collection.find_one(filter.clone()).await?;
         if existing.is_none() {
             debug!(
                 "Creating missing pool: network_id={}, address={}",
                 network_id, address
             );
+
+            // Verify pool on-chain before inserting
+            Self::verify_pool_on_chain(db, network_id, address).await?;
+
             let pool = Pool::new(network_id, address.to_string());
             collection.insert_one(pool).await?;
         }
@@ -180,7 +261,32 @@ impl PoolService {
             request.network_id, request.address
         );
 
+        // Always verify the pool on-chain before creating/restoring
+        Self::verify_pool_on_chain(db, request.network_id, &request.address).await?;
+
         let collection = db.collection::<Pool>("pools");
+        // Check if pool exists (including soft-deleted)
+        let filter = doc! {
+            "network_id": request.network_id as i64,
+            "address": &request.address
+        };
+        let existing = collection.find_one(filter.clone()).await?;
+
+        if let Some(_existing_pool) = existing {
+            // Pool exists, restore it and update
+            debug!("Pool exists, restoring and updating");
+            let update = doc! {
+                "$set": {
+                    "updated_at": chrono::Utc::now().timestamp() as i64,
+                    "deleted_at": null
+                }
+            };
+            collection.update_one(filter.clone(), update).await?;
+            let restored_pool = collection.find_one(filter).await?.unwrap();
+            return Ok(Self::map_to_response(restored_pool));
+        }
+
+        // Create new pool
         let pool = Pool::new(request.network_id, request.address);
         let result = collection.insert_one(&pool).await?;
         let id = result.inserted_id.as_object_id().unwrap();
@@ -190,6 +296,40 @@ impl PoolService {
 
         debug!("Pool created successfully with id: {}", id);
         Ok(Self::map_to_response(created_pool))
+    }
+
+    /// Soft delete a pool by ID (set deleted_at instead of removing)
+    pub async fn delete_pool(db: &Database, id: &ObjectId) -> anyhow::Result<()> {
+        debug!("Soft deleting pool with id: {}", id);
+
+        let collection = db.collection::<Pool>("pools");
+        let filter = doc! {
+            "_id": id,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
+
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Pool with id {} not found or already deleted",
+                id
+            ));
+        }
+
+        let update = doc! {
+            "$set": {
+                "deleted_at": chrono::Utc::now().timestamp() as i64,
+                "updated_at": chrono::Utc::now().timestamp() as i64,
+            }
+        };
+
+        collection.update_one(filter, update).await?;
+
+        debug!("Pool soft deleted successfully: {}", id);
+        Ok(())
     }
 
     /// Update an existing pool

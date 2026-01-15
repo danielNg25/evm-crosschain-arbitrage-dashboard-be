@@ -64,7 +64,13 @@ impl PathService {
         debug!("Fetching all paths");
 
         let collection = db.collection::<Path>("paths");
-        let filter = doc! {};
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let mut cursor = collection.find(filter).await?;
         let mut paths = Vec::new();
 
@@ -92,7 +98,14 @@ impl PathService {
         debug!("Fetching path with id: {}", id);
 
         let collection = db.collection::<Path>("paths");
-        let filter = doc! { "_id": id };
+        // Filter out soft-deleted records
+        let filter = doc! {
+            "_id": id,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
         let path = collection.find_one(filter).await?;
 
         if let Some(path) = path {
@@ -118,12 +131,17 @@ impl PathService {
         debug!("Fetching paths with anchor_token: {}", anchor_token);
 
         let collection = db.collection::<Path>("paths");
+        // Filter out soft-deleted records
         let filter = doc! {
             "paths": {
                 "$elemMatch": {
                     "anchor_token": anchor_token
                 }
-            }
+            },
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
         };
         let mut cursor = collection.find(filter).await?;
         let mut paths = Vec::new();
@@ -152,12 +170,17 @@ impl PathService {
         debug!("Fetching paths with chain_id: {}", chain_id);
 
         let collection = db.collection::<Path>("paths");
+        // Filter out soft-deleted records
         let filter = doc! {
             "paths": {
                 "$elemMatch": {
                     "chain_id": chain_id as i64
                 }
-            }
+            },
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
         };
         let mut cursor = collection.find(filter).await?;
         let mut paths = Vec::new();
@@ -189,6 +212,7 @@ impl PathService {
         Self::ensure_pools_exist(db, &request.paths).await?;
 
         let collection = db.collection::<Path>("paths");
+        // Paths don't have a natural unique key, so always create new
         let path = Path::new(request.paths);
         let result = collection.insert_one(&path).await?;
         let id = result.inserted_id.as_object_id().unwrap();
@@ -218,9 +242,16 @@ impl PathService {
         debug!("Updating path with id: {}", id);
 
         let collection = db.collection::<Path>("paths");
-        let filter = doc! { "_id": id };
+        // Only update non-deleted paths
+        let filter = doc! {
+            "_id": id,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
 
-        // Check if path exists
+        // Check if path exists and is not deleted
         let existing = collection.find_one(filter.clone()).await?;
         if existing.is_none() {
             return Err(anyhow::anyhow!("Path with id {} not found", id));
@@ -244,6 +275,40 @@ impl PathService {
 
         debug!("Path updated successfully: {}", id);
         Ok(Self::map_to_response(path))
+    }
+
+    /// Soft delete a path by ID (set deleted_at instead of removing)
+    pub async fn delete_path(db: &Database, id: &ObjectId) -> anyhow::Result<()> {
+        debug!("Soft deleting path with id: {}", id);
+
+        let collection = db.collection::<Path>("paths");
+        let filter = doc! {
+            "_id": id,
+            "$or": [
+                { "deleted_at": null },
+                { "deleted_at": { "$exists": false } }
+            ]
+        };
+
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Path with id {} not found or already deleted",
+                id
+            ));
+        }
+
+        let update = doc! {
+            "$set": {
+                "deleted_at": chrono::Utc::now().timestamp() as i64,
+                "updated_at": chrono::Utc::now().timestamp() as i64,
+            }
+        };
+
+        collection.update_one(filter, update).await?;
+
+        debug!("Path soft deleted successfully: {}", id);
+        Ok(())
     }
 
     /// Map Path model to PathResponse DTO
