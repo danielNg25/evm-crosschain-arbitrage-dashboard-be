@@ -1,0 +1,37 @@
+[package]
+name = "crosschain-bot-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+actix-web = "4.4"
+actix-cors = "0.6"
+actix-web-actors = "4"
+actix = "0.13"
+tokio = { version = "1.0", features = ["full"] }
+mongodb = { version = "3.2.5" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+env_logger = "0.10"
+log = "0.4"
+anyhow = "1.0"
+thiserror = "1.0"
+hex = "0.4"
+derive_more = "0.99"
+futures = "0.3"
+async-trait = "0.1"
+rand = "0.8"
+alloy-primitives = "0.1"
+alloy = { version = "1.0.27", features = ["full"] }
+bson = "2.8"
+regex = "1.10"
+# Telegram bot
+teloxide = { version = "0.17.0", features = ["macros", "throttle"] }
+dashmap = "6.1.0"                                                    # Thread-safe hashmaps
+num-traits = "0.2"
+uniswap_v3_math = "0.6.0"
+reqwest = { version = "0.11", features = ["json"] }
+clap = { version = "4.3", features = ["derive"] }
+url = "2.5.0"
