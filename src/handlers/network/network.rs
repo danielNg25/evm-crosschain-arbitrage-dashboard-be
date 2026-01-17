@@ -153,6 +153,45 @@ pub async fn update_network_handler(
     }
 }
 
+/// POST /networks/{chain_id}/undelete - Undelete a network
+/// Requires API key authentication via X-API-Key header
+///
+/// # Arguments
+/// * `_api_key` - API key from X-API-Key header (validated by extractor)
+/// * `db` - Database connection
+/// * `path` - Path parameters containing chain_id
+///
+/// # Returns
+/// JSON object of NetworkResponse containing undeleted network information
+pub async fn undelete_network_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<u64>,
+) -> Result<HttpResponse, ApiError> {
+    let chain_id = path.into_inner();
+    info!("Handling POST /networks/{}/undelete request", chain_id);
+    match NetworkService::undelete_network(&db, chain_id).await {
+        Ok(network) => {
+            info!("Successfully undeleted network with chain_id: {}", chain_id);
+            Ok(HttpResponse::Ok().json(network))
+        }
+        Err(e) => {
+            error!("Failed to undelete network {}: {}", chain_id, e);
+            if e.to_string().contains("not found") {
+                Err(ApiError::NotFound(format!(
+                    "Network with chain_id {} not found",
+                    chain_id
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to undelete network: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
 /// PUT /networks/{chain_id}/factories - Updates both V2 factory fees and Aero factory addresses
 /// Requires API key authentication via X-API-Key header
 ///
@@ -231,6 +270,42 @@ pub async fn delete_network_handler(
             } else {
                 Err(ApiError::DatabaseError(format!(
                     "Failed to delete network: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
+/// DELETE /networks/{chain_id}/hard - Hard deletes a network (permanently removes from database)
+/// Only works on networks that are already soft-deleted
+/// Requires API key authentication via X-API-Key header
+pub async fn hard_delete_network_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<u64>,
+) -> Result<HttpResponse, ApiError> {
+    let chain_id = path.into_inner();
+    info!("Handling DELETE /networks/{}/hard request", chain_id);
+
+    match NetworkService::hard_delete_network(&db, chain_id).await {
+        Ok(()) => {
+            info!(
+                "Successfully hard deleted network with chain_id: {}",
+                chain_id
+            );
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!("Failed to hard delete network {}: {}", chain_id, e);
+            if e.to_string().contains("not found") || e.to_string().contains("not soft-deleted") {
+                Err(ApiError::NotFound(format!(
+                    "Network with chain_id {} not found or not soft-deleted",
+                    chain_id
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to hard delete network: {}",
                     e
                 )))
             }

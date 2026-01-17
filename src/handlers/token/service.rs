@@ -193,6 +193,56 @@ impl TokenService {
         Ok(())
     }
 
+    /// Hard delete a token (permanently remove from database)
+    /// Only works on records that are already soft-deleted
+    ///
+    /// # Arguments
+    /// * `db` - Database reference
+    /// * `network_id` - The network ID
+    /// * `address` - The token address
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully deleted
+    /// * `Err(anyhow::Error)` - Error if token not found or not soft-deleted
+    pub async fn hard_delete_token(
+        db: &Database,
+        network_id: u64,
+        address: &Address,
+    ) -> anyhow::Result<()> {
+        let addr_str = address_to_string(address);
+        debug!(
+            "Hard deleting token with network_id: {}, address: {}",
+            network_id, addr_str
+        );
+
+        let collection = db.collection::<Token>("tokens");
+        // Only hard delete if already soft-deleted
+        let filter = doc! {
+            "network_id": network_id as i64,
+            "address": &addr_str,
+            "deleted_at": { "$ne": null, "$exists": true }
+        };
+
+        // Check if token exists and is soft-deleted
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Token with network_id {} and address {} not found or not soft-deleted",
+                network_id,
+                addr_str
+            ));
+        }
+
+        // Hard delete: actually remove from database
+        collection.delete_one(filter).await?;
+
+        debug!(
+            "Token hard deleted successfully: network_id={}, address={}",
+            network_id, addr_str
+        );
+        Ok(())
+    }
+
     /// Map Token model to TokenResponse DTO
     ///
     /// # Arguments

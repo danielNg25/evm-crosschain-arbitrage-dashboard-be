@@ -1,7 +1,9 @@
+use alloy::primitives::Address;
 use futures::TryStreamExt;
 use log::debug;
 use mongodb::bson::doc;
 use mongodb::Database;
+use std::str::FromStr;
 
 use crate::{
     database::models::Network,
@@ -14,6 +16,78 @@ use crate::{
 pub struct NetworkService;
 
 impl NetworkService {
+    /// Validate that an address string is a valid Ethereum address
+    fn validate_address(address: &str) -> anyhow::Result<Address> {
+        Address::from_str(address)
+            .map_err(|e| anyhow::anyhow!("Invalid address format '{}': {}", address, e))
+    }
+
+    /// Validate all addresses in a network request
+    fn validate_network_addresses(request: &CreateNetworkRequest) -> anyhow::Result<()> {
+        // Validate wrap_native
+        Self::validate_address(&request.wrap_native)?;
+
+        // Validate multicall_address if provided
+        if let Some(ref addr) = request.multicall_address {
+            Self::validate_address(addr)?;
+        }
+
+        // Validate all addresses in v2_factory_to_fee keys
+        if let Some(ref factory_to_fee) = request.v2_factory_to_fee {
+            for factory_addr in factory_to_fee.keys() {
+                Self::validate_address(factory_addr)?;
+            }
+        }
+
+        // Validate all addresses in aero_factory_addresses
+        if let Some(ref aero_addresses) = request.aero_factory_addresses {
+            for addr in aero_addresses {
+                Self::validate_address(addr)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate addresses in an update request
+    fn validate_update_addresses(request: &UpdateNetworkRequest) -> anyhow::Result<()> {
+        if let Some(ref addr) = request.wrap_native {
+            Self::validate_address(addr)?;
+        }
+
+        if let Some(ref addr) = request.multicall_address {
+            Self::validate_address(addr)?;
+        }
+
+        if let Some(ref factory_to_fee) = request.v2_factory_to_fee {
+            for factory_addr in factory_to_fee.keys() {
+                Self::validate_address(factory_addr)?;
+            }
+        }
+
+        if let Some(ref aero_addresses) = request.aero_factory_addresses {
+            for addr in aero_addresses {
+                Self::validate_address(addr)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Validate addresses in factories update request
+    fn validate_factories_addresses(request: &UpdateFactoriesRequest) -> anyhow::Result<()> {
+        // Validate all addresses in v2_factory_to_fee keys
+        for factory_addr in request.v2_factory_to_fee.keys() {
+            Self::validate_address(factory_addr)?;
+        }
+
+        // Validate all addresses in aero_factory_addresses
+        for addr in &request.aero_factory_addresses {
+            Self::validate_address(addr)?;
+        }
+
+        Ok(())
+    }
     /// Get all networks
     ///
     /// # Arguments
@@ -23,16 +97,11 @@ impl NetworkService {
     /// * `Ok(Vec<NetworkResponse>)` - List of networks
     /// * `Err(anyhow::Error)` - Error if database operation fails
     pub async fn get_networks_with_stats(db: &Database) -> anyhow::Result<Vec<NetworkResponse>> {
-        debug!("Fetching all networks");
+        debug!("Fetching all networks (including deleted)");
 
         let collection = db.collection::<Network>("networks");
-        // Filter out soft-deleted records
-        let filter = doc! {
-            "$or": [
-                { "deleted_at": null },
-                { "deleted_at": { "$exists": false } }
-            ]
-        };
+        // Return all networks, including deleted ones
+        let filter = doc! {};
         let mut cursor = collection.find(filter).await?;
         let mut networks = Vec::new();
 
@@ -58,6 +127,9 @@ impl NetworkService {
             .map(|oid| oid.to_hex())
             .unwrap_or_else(|| "unknown".to_string());
 
+        // Determine if network is deleted
+        let deleted = network.deleted_at.is_some();
+
         NetworkResponse {
             id,
             chain_id: network.chain_id,
@@ -74,6 +146,7 @@ impl NetworkService {
             wait_time_fetch: network.wait_time_fetch,
             created_at: network.created_at,
             updated_at: network.updated_at,
+            deleted,
         }
     }
 
@@ -90,16 +163,15 @@ impl NetworkService {
         db: &Database,
         chain_id: u64,
     ) -> anyhow::Result<Option<NetworkResponse>> {
-        debug!("Fetching network with chain_id: {}", chain_id);
+        debug!(
+            "Fetching network with chain_id: {} (including deleted)",
+            chain_id
+        );
 
         let collection = db.collection::<Network>("networks");
-        // Filter out soft-deleted records
+        // Return network even if deleted
         let filter = doc! {
-            "chain_id": chain_id as i64,
-            "$or": [
-                { "deleted_at": null },
-                { "deleted_at": { "$exists": false } }
-            ]
+            "chain_id": chain_id as i64
         };
         let network = collection.find_one(filter).await?;
 
@@ -124,6 +196,9 @@ impl NetworkService {
         request: CreateNetworkRequest,
     ) -> anyhow::Result<NetworkResponse> {
         debug!("Creating network with chain_id: {}", request.chain_id);
+
+        // Validate all addresses before processing
+        Self::validate_network_addresses(&request)?;
 
         let collection = db.collection::<Network>("networks");
 
@@ -200,6 +275,9 @@ impl NetworkService {
     ) -> anyhow::Result<NetworkResponse> {
         debug!("Updating network with chain_id: {}", chain_id);
 
+        // Validate all addresses before processing
+        Self::validate_update_addresses(&request)?;
+
         let collection = db.collection::<Network>("networks");
         let filter = doc! { "chain_id": chain_id as i64 };
 
@@ -235,6 +313,7 @@ impl NetworkService {
             update_doc.insert("min_profit_usd", min_profit_usd);
         }
         if let Some(v2_factory_to_fee) = request.v2_factory_to_fee {
+            // Addresses already validated above
             let mut bson_map = mongodb::bson::Document::new();
             for (key, value) in v2_factory_to_fee {
                 bson_map.insert(key, value as i64);
@@ -283,6 +362,9 @@ impl NetworkService {
             "Updating factories (V2 and Aero) for network with chain_id: {}",
             chain_id
         );
+
+        // Validate all addresses before processing
+        Self::validate_factories_addresses(&request)?;
 
         let collection = db.collection::<Network>("networks");
         let filter = doc! { "chain_id": chain_id as i64 };
@@ -364,5 +446,81 @@ impl NetworkService {
 
         debug!("Network soft deleted successfully: {}", chain_id);
         Ok(())
+    }
+
+    /// Hard delete a network (permanently remove from database)
+    /// Only works on records that are already soft-deleted
+    ///
+    /// # Arguments
+    /// * `db` - Database reference
+    /// * `chain_id` - The chain_id of the network to hard delete
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully deleted
+    /// * `Err(anyhow::Error)` - Error if network not found or not soft-deleted
+    pub async fn hard_delete_network(db: &Database, chain_id: u64) -> anyhow::Result<()> {
+        debug!("Hard deleting network with chain_id: {}", chain_id);
+
+        let collection = db.collection::<Network>("networks");
+        // Only hard delete if already soft-deleted
+        let filter = doc! {
+            "chain_id": chain_id as i64,
+            "deleted_at": { "$ne": null, "$exists": true }
+        };
+
+        // Check if network exists and is soft-deleted
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Network with chain_id {} not found or not soft-deleted",
+                chain_id
+            ));
+        }
+
+        // Hard delete: actually remove from database
+        collection.delete_one(filter).await?;
+
+        debug!("Network hard deleted successfully: {}", chain_id);
+        Ok(())
+    }
+
+    /// Undelete (restore) a network by setting deleted_at to null
+    ///
+    /// # Arguments
+    /// * `db` - Database reference
+    /// * `chain_id` - The chain_id of the network to restore
+    ///
+    /// # Returns
+    /// * `Ok(NetworkResponse)` - Restored network
+    /// * `Err(anyhow::Error)` - Error if database operation fails or network not found
+    pub async fn undelete_network(db: &Database, chain_id: u64) -> anyhow::Result<NetworkResponse> {
+        debug!("Undelete (restore) network with chain_id: {}", chain_id);
+
+        let collection = db.collection::<Network>("networks");
+        let filter = doc! { "chain_id": chain_id as i64 };
+
+        // Check if network exists
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Network with chain_id {} not found",
+                chain_id
+            ));
+        }
+
+        // Restore: set deleted_at to null
+        let update = doc! {
+            "$set": {
+                "deleted_at": null,
+                "updated_at": chrono::Utc::now().timestamp() as i64
+            }
+        };
+        collection.update_one(filter.clone(), update).await?;
+
+        // Get restored network
+        let network = collection.find_one(filter).await?.unwrap();
+
+        debug!("Network restored successfully: {}", chain_id);
+        Ok(Self::map_to_response(network))
     }
 }

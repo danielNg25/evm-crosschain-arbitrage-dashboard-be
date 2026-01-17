@@ -3,6 +3,7 @@ use actix_web::web;
 use crate::handlers::token::{
     count_tokens_by_network_id_handler, delete_token_by_address_handler,
     get_token_by_address_handler, get_tokens_by_network_id_handler, get_tokens_handler,
+    hard_delete_token_handler,
 };
 
 pub fn configure_token_routes(cfg: &mut web::ServiceConfig) {
@@ -18,6 +19,10 @@ pub fn configure_token_routes(cfg: &mut web::ServiceConfig) {
         .route(
             "/tokens/network/{network_id}/address/{address}",
             web::delete().to(delete_token_by_address_handler),
+        )
+        .route(
+            "/tokens/network/{network_id}/address/{address}/hard",
+            web::delete().to(hard_delete_token_handler),
         )
         .route(
             "/tokens/network/{network_id}/count",

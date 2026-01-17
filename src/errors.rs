@@ -49,7 +49,7 @@ impl ResponseError for ApiError {
             })),
             ApiError::DatabaseError(ref message) => {
                 HttpResponse::InternalServerError().json(json!({
-                    "error": format!("Database error: {}", message)
+                    "error": format!("{}", message)
                 }))
             }
             ApiError::Unauthorized(ref message) => HttpResponse::Unauthorized().json(json!({

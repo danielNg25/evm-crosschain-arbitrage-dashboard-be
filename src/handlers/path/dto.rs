@@ -7,6 +7,7 @@ pub struct PathResponse {
     pub paths: Vec<crate::bot::models::path::SingleChainPathsWithAnchorToken>,
     pub created_at: u64,
     pub updated_at: u64,
+    pub deleted: bool,
 }
 
 /// Request model for creating a new path

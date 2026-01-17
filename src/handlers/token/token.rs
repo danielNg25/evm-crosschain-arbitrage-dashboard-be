@@ -1,15 +1,12 @@
+use crate::{
+    errors::ApiError,
+    handlers::{config::auth::ApiKey, token::service::TokenService},
+};
 use actix_web::{web, HttpResponse};
 use alloy::primitives::Address;
 use log::{error, info};
 use mongodb::Database;
-
-use crate::{
-    errors::ApiError,
-    handlers::{
-        config::auth::ApiKey,
-        token::service::TokenService,
-    },
-};
+use std::str::FromStr;
 
 /// GET /tokens - Returns all tokens
 ///
@@ -189,6 +186,59 @@ pub async fn delete_token_by_address_handler(
             } else {
                 Err(ApiError::DatabaseError(format!(
                     "Failed to delete token: {}",
+                    e
+                )))
+            }
+        }
+    }
+}
+
+/// DELETE /tokens/network/{network_id}/address/{address}/hard - Hard deletes a token (permanently removes from database)
+/// Only works on tokens that are already soft-deleted
+/// Requires API key authentication via X-API-Key header
+pub async fn hard_delete_token_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<(u64, String)>,
+) -> Result<HttpResponse, ApiError> {
+    let (network_id, address_str) = path.into_inner();
+    info!(
+        "Handling DELETE /tokens/network/{}/address/{}/hard request",
+        network_id, address_str
+    );
+
+    let address = match Address::from_str(&address_str) {
+        Ok(addr) => addr,
+        Err(e) => {
+            error!("Invalid address format: {}", e);
+            return Err(ApiError::BadRequest(format!(
+                "Invalid address format: {}",
+                e
+            )));
+        }
+    };
+
+    match TokenService::hard_delete_token(&db, network_id, &address).await {
+        Ok(()) => {
+            info!(
+                "Successfully hard deleted token with network_id: {}, address: {}",
+                network_id, address_str
+            );
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!(
+                "Failed to hard delete token network_id={}, address={}: {}",
+                network_id, address_str, e
+            );
+            if e.to_string().contains("not found") || e.to_string().contains("not soft-deleted") {
+                Err(ApiError::NotFound(format!(
+                    "Token with network_id {} and address {} not found or not soft-deleted",
+                    network_id, address_str
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to hard delete token: {}",
                     e
                 )))
             }

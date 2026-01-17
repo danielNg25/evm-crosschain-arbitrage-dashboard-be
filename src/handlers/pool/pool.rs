@@ -269,3 +269,44 @@ pub async fn delete_pool_handler(
         }
     }
 }
+
+/// DELETE /pools/{id}/hard - Hard deletes a pool (permanently removes from database)
+/// Only works on pools that are already soft-deleted
+/// Requires API key authentication via X-API-Key header
+pub async fn hard_delete_pool_handler(
+    _api_key: ApiKey,
+    db: web::Data<Database>,
+    path: web::Path<String>,
+) -> Result<HttpResponse, ApiError> {
+    let id_str = path.into_inner();
+    info!("Handling DELETE /pools/{}/hard request", id_str);
+
+    let id = match ObjectId::parse_str(&id_str) {
+        Ok(id) => id,
+        Err(e) => {
+            error!("Invalid ObjectId format: {}", e);
+            return Err(ApiError::BadRequest(format!("Invalid ID format: {}", e)));
+        }
+    };
+
+    match PoolService::hard_delete_pool(&db, &id).await {
+        Ok(()) => {
+            info!("Successfully hard deleted pool with id: {}", id_str);
+            Ok(HttpResponse::NoContent().finish())
+        }
+        Err(e) => {
+            error!("Failed to hard delete pool {}: {}", id_str, e);
+            if e.to_string().contains("not found") || e.to_string().contains("not soft-deleted") {
+                Err(ApiError::NotFound(format!(
+                    "Pool with id {} not found or not soft-deleted",
+                    id_str
+                )))
+            } else {
+                Err(ApiError::DatabaseError(format!(
+                    "Failed to hard delete pool: {}",
+                    e
+                )))
+            }
+        }
+    }
+}

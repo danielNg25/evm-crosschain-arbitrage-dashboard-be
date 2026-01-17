@@ -2,10 +2,11 @@ use alloy::eips::{BlockId, BlockNumberOrTag};
 use alloy::primitives::Address;
 use alloy::providers::{Provider, ProviderBuilder, MULTICALL3_ADDRESS};
 use futures::TryStreamExt;
-use log::{debug, error, warn};
+use log::{debug, error, info, warn};
 use mongodb::bson::{doc, oid::ObjectId};
 use mongodb::Database;
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 use url::Url;
 
@@ -22,6 +23,11 @@ use crate::{
 pub struct PoolService;
 
 impl PoolService {
+    /// Validate that an address string is a valid Ethereum address
+    fn validate_address(address: &str) -> anyhow::Result<Address> {
+        Address::from_str(address)
+            .map_err(|e| anyhow::anyhow!("Invalid address format '{}': {}", address, e))
+    }
     /// Verify a pool on-chain by identifying its type and fetching its data.
     ///
     /// This ensures the pool is a valid Uniswap V2/V3 pool before we persist it.
@@ -36,9 +42,9 @@ impl PoolService {
                 let provider = create_provider(network.rpcs);
                 let multicall_address: Address = network
                     .multicall_address
-                    .unwrap_or(MULTICALL3_ADDRESS.to_string())
-                    .parse::<Address>()
-                    .unwrap();
+                    .as_ref()
+                    .and_then(|s| Address::from_str(s).ok())
+                    .unwrap_or(MULTICALL3_ADDRESS);
 
                 if let Err(e) = identify_and_fetch_pool(
                     Arc::new(provider),
@@ -261,6 +267,9 @@ impl PoolService {
             request.network_id, request.address
         );
 
+        // Validate address format
+        Self::validate_address(&request.address)?;
+
         // Always verify the pool on-chain before creating/restoring
         Self::verify_pool_on_chain(db, request.network_id, &request.address).await?;
 
@@ -332,6 +341,42 @@ impl PoolService {
         Ok(())
     }
 
+    /// Hard delete a pool (permanently remove from database)
+    /// Only works on records that are already soft-deleted
+    ///
+    /// # Arguments
+    /// * `db` - Database reference
+    /// * `id` - The ObjectId of the pool to hard delete
+    ///
+    /// # Returns
+    /// * `Ok(())` - Successfully deleted
+    /// * `Err(anyhow::Error)` - Error if pool not found or not soft-deleted
+    pub async fn hard_delete_pool(db: &Database, id: &ObjectId) -> anyhow::Result<()> {
+        debug!("Hard deleting pool with id: {}", id);
+
+        let collection = db.collection::<Pool>("pools");
+        // Only hard delete if already soft-deleted
+        let filter = doc! {
+            "_id": id,
+            "deleted_at": { "$ne": null, "$exists": true }
+        };
+
+        // Check if pool exists and is soft-deleted
+        let existing = collection.find_one(filter.clone()).await?;
+        if existing.is_none() {
+            return Err(anyhow::anyhow!(
+                "Pool with id {} not found or not soft-deleted",
+                id
+            ));
+        }
+
+        // Hard delete: actually remove from database
+        collection.delete_one(filter).await?;
+
+        debug!("Pool hard deleted successfully: {}", id);
+        Ok(())
+    }
+
     /// Update an existing pool
     ///
     /// # Arguments
@@ -366,6 +411,8 @@ impl PoolService {
             update_doc.insert("network_id", network_id as i64);
         }
         if let Some(address) = request.address {
+            // Validate address format
+            Self::validate_address(&address)?;
             update_doc.insert("address", address);
         }
 

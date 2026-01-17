@@ -19,6 +19,7 @@ pub struct NetworkResponse {
     pub wait_time_fetch: u64,
     pub created_at: u64,
     pub updated_at: u64,
+    pub deleted: bool,
 }
 
 // Request model for creating a new network
