@@ -63,11 +63,16 @@ async fn main() -> std::io::Result<()> {
 
     HttpServer::new(move || {
         // Configure CORS from config
-        let mut cors = Cors::default();
+        let allowed_origins = config.cors.allowed_origins.clone();
 
-        for origin in &config.cors.allowed_origins {
-            cors = cors.allowed_origin(origin);
-        }
+        // Use allowed_origin_fn for more flexible origin matching
+        let cors = Cors::default().allowed_origin_fn(move |origin, _req_head| {
+            let origin_str = match origin.to_str() {
+                Ok(s) => s,
+                Err(_) => return false,
+            };
+            allowed_origins.iter().any(|allowed| origin_str == allowed)
+        });
 
         // Convert string methods to HTTP methods
         let methods: Vec<actix_web::http::Method> = config
@@ -90,18 +95,21 @@ async fn main() -> std::io::Result<()> {
         let mut all_methods = methods;
         all_methods.push(actix_web::http::Method::from_bytes(b"OPTIONS").unwrap());
 
-        cors = cors
+        let cors = cors
             .allowed_methods(all_methods)
             .allowed_headers(all_headers)
             .expose_headers(vec![
                 "Upgrade".to_string(),
                 "Connection".to_string(),
                 "Sec-WebSocket-Accept".to_string(),
-            ]);
+            ])
+            .max_age(3600);
 
-        if config.cors.supports_credentials {
-            cors = cors.supports_credentials();
-        }
+        let cors = if config.cors.supports_credentials {
+            cors.supports_credentials()
+        } else {
+            cors
+        };
 
         App::new()
             .app_data(web::Data::new(db.clone()))
